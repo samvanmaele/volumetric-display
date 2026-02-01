@@ -429,7 +429,7 @@ class OpenGLEngine: EngineBase
         }
         void setupSSBO(const std::vector<GpuTriangle>& tris)
         {
-            size_t totalWords = 570 * 1140 * ((570 + 31) / 32);
+            size_t totalWords = 570 * 1140 * ((160 + 31) / 32);
             glGenBuffers(1, &voxelSSBO);
             glBindBuffer(GL_SHADER_STORAGE_BUFFER, voxelSSBO);
             glBufferData(GL_SHADER_STORAGE_BUFFER, totalWords * sizeof(uint32_t), nullptr, GL_DYNAMIC_DRAW);

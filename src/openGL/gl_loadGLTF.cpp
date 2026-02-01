@@ -26,7 +26,7 @@ GlModel::GlModel(const char* filename)
 
     float logicalWidth  = 570.0f;
     float logicalHeight = 570.0f;
-    float logicalDepth  = 570.0f;
+    float logicalDepth  = 160.0f;
 
     glm::vec3 center = (globalMin + globalMax) * 0.5f;
     glm::vec3 size   = globalMax - globalMin;
