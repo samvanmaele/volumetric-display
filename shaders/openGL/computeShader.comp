@@ -1,0 +1,182 @@
+#version 450 core
+
+layout (local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
+layout(std430, binding = 0) restrict writeonly buffer VolumeBuffer { uint data[]; } volume;
+
+const uint WIDTH  = 570;
+const uint HEIGHT = 1140;
+const uint DEPTH  = 570;
+const uint NUM_WORDS = (DEPTH + 31) / 32;
+const float DIST_THRESHOLD = 5.0;
+const float DIST_SQ = 25.0;
+
+struct Triangle
+{
+    vec4 v0, v1, v2;
+};
+
+layout(std430, binding = 1) readonly buffer TriangleBuffer { Triangle tris[]; } mesh;
+uniform uint numTriangles;
+
+shared Triangle sharedTris[128];
+
+struct TriCache
+{
+    vec3 e0, e1, e2;
+    vec3 n;
+    vec3 v1;
+    vec3 minV, maxV;
+    float d00, d11, d01, d22;
+    float rcp_d00, rcp_d11, rcp_d22;
+    float invDet;
+    float sqrt_n2;
+    float ds, dt;
+};
+shared TriCache triCache[128];
+
+void main()
+{
+    uint x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    uint localIdx = gl_LocalInvocationIndex;
+
+    if (x >= WIDTH || y >= HEIGHT) return;
+
+    float offset = 0.5 * float(y & 1u);
+    vec2 pXY = vec2(float(x) + offset, floor(float(y) * 0.5) + offset);
+    
+    uint baseIndex = x + y * WIDTH;
+    uint stride = WIDTH * HEIGHT;
+
+    for (uint wz = 0; wz < NUM_WORDS; ++wz)
+    {
+        uint val = 0;
+        float fBaseZ = float(wz << 5);
+
+        for (uint batch = 0; batch < numTriangles; batch += 128)
+        {
+            uint batchSize = min(128, numTriangles - batch);
+            
+            if (localIdx < batchSize)
+            {
+                uint idx = batch + localIdx;
+                Triangle tri = mesh.tris[idx];
+                sharedTris[localIdx] = tri;
+                
+                vec3 v0 = tri.v0.xyz;
+                vec3 v1 = tri.v1.xyz;
+                vec3 v2 = tri.v2.xyz;
+                
+                vec3 e0 = v1 - v0;
+                vec3 e1 = v2 - v0;
+                vec3 e2 = v2 - v1;
+                vec3 n = cross(e0, e1);
+                
+                float d00 = dot(e0, e0);
+                float d01 = dot(e0, e1);
+                float d11 = dot(e1, e1);
+                float d22 = dot(e2, e2);
+                float det = d00 * d11 - d01 * d01;
+                
+                triCache[localIdx].e0 = e0;
+                triCache[localIdx].e1 = e1;
+                triCache[localIdx].e2 = e2;
+                triCache[localIdx].n = n;
+                triCache[localIdx].v1 = v1;
+                triCache[localIdx].minV = min(v0, min(v1, v2)) - DIST_THRESHOLD;
+                triCache[localIdx].maxV = max(v0, max(v1, v2)) + DIST_THRESHOLD;
+                triCache[localIdx].d00 = d00;
+                triCache[localIdx].d11 = d11;
+                triCache[localIdx].d01 = d01;
+                triCache[localIdx].d22 = d22;
+                triCache[localIdx].rcp_d00 = 1.0 / d00;
+                triCache[localIdx].rcp_d11 = 1.0 / d11;
+                triCache[localIdx].rcp_d22 = 1.0 / d22;
+                triCache[localIdx].invDet = 1.0 / det;
+                triCache[localIdx].sqrt_n2 = sqrt(dot(n, n));
+                triCache[localIdx].ds = (d11 * e0.z - d01 * e1.z) / det;
+                triCache[localIdx].dt = (d00 * e1.z - d01 * e0.z) / det;
+            }
+            barrier();
+
+            for (uint t = 0; t < batchSize; ++t)
+            {
+                if (pXY.x < triCache[t].minV.x || pXY.x > triCache[t].maxV.x || pXY.y < triCache[t].minV.y || pXY.y > triCache[t].maxV.y) continue;
+                if (fBaseZ + 31.0 < triCache[t].minV.z || fBaseZ > triCache[t].maxV.z) continue;
+                
+                float sqrt_n2 = triCache[t].sqrt_n2;
+                if (sqrt_n2 < 0.0001) continue;
+
+                vec3 v0 = sharedTris[t].v0.xyz;
+                vec3 v1 = triCache[t].v1;
+                vec3 n  = triCache[t].n;
+                vec3 e0 = triCache[t].e0;
+                vec3 e1 = triCache[t].e1;
+                vec3 e2 = triCache[t].e2;
+                
+                vec2 wXY = pXY - v0.xy;
+                float k = dot(n.xy, wXY) - n.z * v0.z;
+                float p_lim = DIST_THRESHOLD * sqrt_n2;
+                
+                int i_start = 0, i_end = 31;
+                float abs_nz = abs(n.z);
+                if (abs_nz > 0.0001)
+                {
+                    float z_center = -k / n.z;
+                    float z_delta = p_lim / abs_nz;
+                    i_start = max(0, int(floor(z_center - z_delta - fBaseZ)));
+                    i_end = min(31, int(ceil(z_center + z_delta - fBaseZ)));
+                }
+                else if (abs(k) > p_lim) continue;
+                if (i_start > i_end) continue;
+
+                float invDet = triCache[t].invDet;
+                vec3 w_init = vec3(wXY, fBaseZ + float(i_start) + 0.5 - v0.z);
+                float d0_dot = dot(w_init, e0);
+                float d1_dot = dot(w_init, e1);
+                float s = (triCache[t].d11 * d0_dot - triCache[t].d01 * d1_dot) * invDet;
+                float tb = (triCache[t].d00 * d1_dot - triCache[t].d01 * d0_dot) * invDet;
+
+                vec2 dXY0 = pXY - v0.xy;
+                vec2 dXY1 = pXY - v1.xy;
+                float dotXY0 = dot(dXY0, e0.xy);
+                float dotXY1 = dot(dXY0, e1.xy);
+                float dotXY2 = dot(dXY1, e2.xy);
+
+                for (int i = i_start; i <= i_end; ++i)
+                {
+                    if (s >= 0.0 && tb >= 0.0 && (s + tb) <= 1.0)
+                    {
+                        val |= (1u << i);
+                    }
+                    else
+                    {
+                        float z_rel = (fBaseZ + float(i) + 0.5);
+                        float zv0 = z_rel - v0.z;
+                        float zv1 = z_rel - v1.z;
+
+                        float t0 = clamp((dotXY0 + zv0 * e0.z) * triCache[t].rcp_d00, 0.0, 1.0);
+                        vec3 diff0 = vec3(dXY0 - e0.xy * t0, zv0 - e0.z * t0);
+                        if (dot(diff0, diff0) < DIST_SQ) { val |= (1u << i); }
+                        else
+                        {
+                            float t1 = clamp((dotXY1 + zv0 * e1.z) * triCache[t].rcp_d11, 0.0, 1.0);
+                            vec3 diff1 = vec3(dXY0 - e1.xy * t1, zv0 - e1.z * t1);
+                            if (dot(diff1, diff1) < DIST_SQ) { val |= (1u << i); }
+                            else
+                            {
+                                float t2 = clamp((dotXY2 + zv1 * e2.z) * triCache[t].rcp_d22, 0.0, 1.0);
+                                vec3 diff2 = vec3(dXY1 - e2.xy * t2, zv1 - e2.z * t2);
+                                if (dot(diff2, diff2) < DIST_SQ) { val |= (1u << i); }
+                            }
+                        }
+                    }
+                    s += triCache[t].ds;
+                    tb += triCache[t].dt;
+                }
+            }
+            barrier();
+        }
+        volume.data[baseIndex + wz * stride] = val;
+    }
+}
