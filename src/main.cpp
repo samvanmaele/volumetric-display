@@ -399,28 +399,31 @@ class OpenGLEngine: EngineBase
                 GLuint dummyVAO;
                 glGenVertexArrays(1, &dummyVAO);
 
+                glUseProgram(computeShader);
+                glUniform1ui(triCountLoc, numTriangles);
+
                 while (running)
                 {
-                    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
                     uint32_t zero = 0;
                     glBindBuffer(GL_SHADER_STORAGE_BUFFER, voxelSSBO);
                     glClearBufferData(GL_SHADER_STORAGE_BUFFER, GL_R32UI, GL_RED_INTEGER, GL_UNSIGNED_INT, &zero);
 
                     glUseProgram(computeShader);
-                    glUniform1ui(triCountLoc, numTriangles);
-
                     glDispatchCompute(ceil(570/32.0), ceil(1140/32.0), 1);
                     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 
-                    glBindVertexArray(dummyVAO);
-                    glUseProgram(shader);
-                    float elapsedSeconds = SDL_GetTicks() / 10000.0f;
-                    glUniform1f(loc, 15.0f * 2.0f * 3.1415926535f * elapsedSeconds);
-                    glDrawArrays(GL_TRIANGLES, 0, 3);
+                    for (int i = 0; i < 5; ++i)
+                    {
+                        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+                        glBindVertexArray(dummyVAO);
+                        glUseProgram(shader);
+                        float elapsedSeconds = SDL_GetTicks() / 1000.0f;
+                        glUniform1f(loc, 15.0f * 2.0f * 3.1415926535f * elapsedSeconds);
+                        glDrawArrays(GL_TRIANGLES, 0, 3);
 
-                    SDL_GL_SwapWindow(window);
-                    frameCount++;
+                        SDL_GL_SwapWindow(window);
+                        frameCount++;
+                    }
                 }
             });
         }
@@ -448,7 +451,7 @@ class OpenGLEngine: EngineBase
                 return;
             }
 
-            SDL_GL_SetSwapInterval(0);
+            SDL_GL_SetSwapInterval(1);
             glEnable(GL_FRAMEBUFFER_SRGB);
             glViewport(0, 0, WIDTH, HEIGHT);
             glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
